@@ -1,0 +1,196 @@
+# -*- coding: utf-8 -*-
+"""Cheminformatics Virtual Laboratory - no RDKit required."""
+from __future__ import print_function
+import os, re, csv, json, html
+from datetime import datetime
+from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, abort
+
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+REPORTS_DIR = os.path.join(DATA_DIR, 'reports')
+STRUCTURES_DIR = os.path.join(DATA_DIR, 'structures')
+GRAPHS_DIR = os.path.join(DATA_DIR, 'graphs')
+for folder in (REPORTS_DIR, STRUCTURES_DIR, GRAPHS_DIR):
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+
+app = Flask(__name__)
+app.secret_key = 'chemlab-local-demo-key'
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
+
+# Educational reference values. These are preset values, not calculations from RDKit.
+MOLECULES = {
+    'water': {'name':'Water','smiles':'O','formula':'H2O','molecular_weight':18.015,'exact_mass':18.0106,'logp':-0.824,'tpsa':31.50,'hbd':2,'hba':1,'rotatable_bonds':0,'rings':0,'heavy_atoms':1,'note':'Reference values for water.'},
+    'methane': {'name':'Methane','smiles':'C','formula':'CH4','molecular_weight':16.043,'exact_mass':16.0313,'logp':1.026,'tpsa':0.0,'hbd':0,'hba':0,'rotatable_bonds':0,'rings':0,'heavy_atoms':1,'note':'Reference values for methane.'},
+    'ethanol': {'name':'Ethanol','smiles':'CCO','formula':'C2H6O','molecular_weight':46.069,'exact_mass':46.0419,'logp':-0.001,'tpsa':20.23,'hbd':1,'hba':1,'rotatable_bonds':1,'rings':0,'heavy_atoms':3,'note':'Reference values for ethanol.'},
+    'acetone': {'name':'Acetone','smiles':'CC(=O)C','formula':'C3H6O','molecular_weight':58.080,'exact_mass':58.0419,'logp':0.595,'tpsa':17.07,'hbd':0,'hba':1,'rotatable_bonds':0,'rings':0,'heavy_atoms':4,'note':'Reference values for acetone.'},
+    'benzene': {'name':'Benzene','smiles':'c1ccccc1','formula':'C6H6','molecular_weight':78.114,'exact_mass':78.0470,'logp':1.686,'tpsa':0.0,'hbd':0,'hba':0,'rotatable_bonds':0,'rings':1,'heavy_atoms':6,'note':'Reference values for benzene.'},
+    'aspirin': {'name':'Aspirin','smiles':'CC(=O)Oc1ccccc1C(=O)O','formula':'C9H8O4','molecular_weight':180.159,'exact_mass':180.0423,'logp':1.310,'tpsa':63.60,'hbd':1,'hba':4,'rotatable_bonds':3,'rings':1,'heavy_atoms':13,'note':'Reference values for aspirin.'},
+    'caffeine': {'name':'Caffeine','smiles':'Cn1c(=O)c2c(ncn2C)n(C)c1=O','formula':'C8H10N4O2','molecular_weight':194.191,'exact_mass':194.0804,'logp':-0.070,'tpsa':58.44,'hbd':0,'hba':6,'rotatable_bonds':0,'rings':2,'heavy_atoms':14,'note':'Reference values for caffeine.'}
+}
+QUIZ = [
+    {'q':'Which notation is commonly used to write molecular structures as text?','options':['SMILES','CSV','PNG','PDF'],'answer':0},
+    {'q':'What does molecular weight represent?','options':['Number of rings only','Mass based on atomic weights','Number of bonds only','Molecular colour'],'answer':1},
+    {'q':'Which descriptor estimates lipophilicity?','options':['TPSA','HBD','LogP','HBA'],'answer':2},
+    {'q':'TPSA stands for:','options':['Total Polar Surface Area','Total Protein Structure Analysis','Theoretical Pressure Scale Average','Total Physical State Approximation'],'answer':0},
+    {'q':'HBD counts:','options':['Heavy bonds','Hydrogen-bond donors','Hydrocarbon rings','Only hydrogen atoms'],'answer':1},
+    {'q':'A CSV file is useful for storing:','options':['Tabular data','Only 3D geometry','Only images','Executable code'],'answer':0},
+    {'q':'Why compare multiple molecules?','options':['Explore structure-property relationships','Make them identical','Remove descriptors','Convert Python into PDF'],'answer':0},
+    {'q':'Which file can commonly be opened by a molecular viewer such as Avogadro?','options':['SDF','MP3','DOCX','EXE'],'answer':0},
+    {'q':'A SMILES string is:','options':['A text representation of molecular structure','A lab temperature','A graph colour','A file compression method'],'answer':0},
+    {'q':'When using reference descriptor values, you should:','options':['Treat them as experimental proof','Record the source and validate important results','Assume every value is exact','Ignore the method used'],'answer':1}
+]
+def safe_name(s):
+    return re.sub(r'[^A-Za-z0-9_-]+','_',s or 'molecule').strip('_')[:60] or 'molecule'
+
+def get_molecule(key):
+    return dict(MOLECULES[key])
+
+@app.context_processor
+def globals_for_templates():
+    return {'molecule_catalog': MOLECULES}
+
+@app.route('/')
+def home():
+    return render_template('index.html', title='Dashboard', molecule_count=len(MOLECULES),
+        report_count=len([x for x in os.listdir(REPORTS_DIR) if os.path.isfile(os.path.join(REPORTS_DIR,x))]))
+
+@app.route('/theory')
+def theory():
+    return render_template('theory.html', title='Theory')
+
+@app.route('/visualize', methods=['GET','POST'])
+def visualize():
+    result = None
+    if request.method == 'POST':
+        key = request.form.get('molecule','ethanol')
+        if key not in MOLECULES:
+            flash('Choose one of the supported reference molecules.', 'error')
+        else:
+            m = get_molecule(key)
+            # Without a chemistry engine, save a SMILES text file instead of claiming to create a true 3D structure.
+            filename = safe_name(m['name']) + '.smi'
+            with open(os.path.join(STRUCTURES_DIR, filename),'w',encoding='utf-8') as f:
+                f.write(m['smiles'] + '\t' + m['name'] + '\n')
+            result = {'molecule':m, 'file':filename}
+            flash('Reference molecule loaded. Download the SMILES file to open/import it in compatible chemistry software.', 'success')
+    return render_template('visualize.html', title='Molecular Visualization', result=result)
+
+@app.route('/properties', methods=['GET','POST'])
+def properties():
+    result = None
+    if request.method == 'POST':
+        key = request.form.get('molecule','ethanol')
+        if key not in MOLECULES:
+            flash('Choose a molecule from the reference library.', 'error')
+        else:
+            result = get_molecule(key)
+            result['value_type'] = 'Preset educational reference data'
+            path = os.path.join(REPORTS_DIR, safe_name(result['name']) + '_properties.csv')
+            with open(path,'w',newline='',encoding='utf-8') as f:
+                writer=csv.writer(f); writer.writerow(['Property','Value'])
+                for k,v in result.items():
+                    if k not in ('note','value_type'): writer.writerow([k,v])
+            flash('Reference properties shown and CSV exported.', 'success')
+    return render_template('properties.html', title='Molecular Properties', result=result)
+
+@app.route('/analysis', methods=['GET','POST'])
+def analysis():
+    rows=None; graph=None; property_key='molecular_weight'
+    if request.method=='POST':
+        keys=request.form.getlist('molecules')
+        property_key=request.form.get('property','molecular_weight')
+        allowed={'molecular_weight':'Molecular weight (g/mol)','logp':'LogP','tpsa':'TPSA (Å²)','hbd':'H-bond donors','hba':'H-bond acceptors','rings':'Ring count'}
+        if property_key not in allowed: property_key='molecular_weight'
+        unique=[]
+        for k in keys:
+            if k in MOLECULES and k not in unique: unique.append(k)
+        if len(unique)<2:
+            flash('Select at least two molecules to compare.', 'error')
+        else:
+            rows=[get_molecule(k) for k in unique]
+            path=os.path.join(REPORTS_DIR,'structure_property_comparison.csv')
+            with open(path,'w',newline='',encoding='utf-8') as f:
+                writer=csv.DictWriter(f,fieldnames=list(rows[0].keys())); writer.writeheader(); writer.writerows(rows)
+            vals=[float(r[property_key]) for r in rows]; maxv=max(vals) if max(vals)>0 else 1
+            bars=[]
+            for r,v in zip(rows,vals):
+                width=max(2,int((v/maxv)*100))
+                bars.append({'name':r['name'],'value':v,'width':width})
+            graph={'label':allowed[property_key],'bars':bars}
+            flash('Comparison and CSV generated from preset reference values.', 'success')
+    return render_template('analysis.html', title='Structure–Property Analysis', rows=rows, graph=graph, property_key=property_key)
+
+@app.route('/assessment', methods=['GET','POST'])
+def assessment():
+    score=None; review=None; student=None; saved_file=None; stage='identity'
+    if request.method == 'POST':
+        action=request.form.get('action','confirm')
+        username=request.form.get('username','').strip()
+        regno=request.form.get('regno','').strip()
+        if action in ('confirm','begin','edit'):
+            if not username or not regno:
+                flash('Please enter both student name and registration number.', 'error')
+                stage='identity'
+            elif action == 'confirm':
+                student={'username':username,'regno':regno}
+                stage='confirm'
+            elif action == 'edit':
+                student={'username':username,'regno':regno}
+                stage='identity'
+            else:
+                student={'username':username,'regno':regno}
+                stage='quiz'
+        elif action == 'submit':
+            if not username or not regno:
+                flash('Student identity is missing. Please start again.', 'error')
+                stage='identity'
+            else:
+                review=[]; score=0
+                for i,q in enumerate(QUIZ):
+                    try: selected=int(request.form.get('q'+str(i),'-1'))
+                    except ValueError: selected=-1
+                    correct=selected==q['answer']
+                    if correct: score+=1
+                    review.append({'question':q['q'],'selected':q['options'][selected] if 0<=selected<len(q['options']) else 'Not answered','correct_answer':q['options'][q['answer']],'correct':correct})
+                student={'username':username,'regno':regno}
+                payload={'timestamp':datetime.now().isoformat(),'username':username,'registration_number':regno,'score':score,'total':len(QUIZ),'review':review}
+                saved_file='assessment_'+safe_name(regno)+'_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'.json'
+                with open(os.path.join(REPORTS_DIR,saved_file),'w',encoding='utf-8') as f: json.dump(payload,f,indent=2)
+                csvpath=os.path.join(REPORTS_DIR,'assessment_results.csv')
+                exists=os.path.exists(csvpath)
+                with open(csvpath,'a',newline='',encoding='utf-8') as f:
+                    w=csv.writer(f)
+                    if not exists: w.writerow(['timestamp','username','registration_number','score','total'])
+                    w.writerow([payload['timestamp'],username,regno,score,len(QUIZ)])
+                flash('Assessment submitted. Student identity and score have been saved locally.', 'success')
+                stage='result'
+    return render_template('assessment.html', title='Assessment', quiz=QUIZ, score=score, review=review, student=student, saved_file=saved_file, stage=stage)
+
+@app.route('/report', methods=['GET','POST'])
+def report():
+    generated=False
+    if request.method=='POST':
+        # HTML report can be printed/saved as PDF by browser; no PDF dependency required.
+        generated=True
+        flash('Report prepared. Use your browser Print → Save as PDF.', 'success')
+    comparison=os.path.exists(os.path.join(REPORTS_DIR,'structure_property_comparison.csv'))
+    assessment_csv=os.path.exists(os.path.join(REPORTS_DIR,'assessment_results.csv'))
+    return render_template('report.html', title='Final Project Report', generated=generated, has_comparison=comparison, has_assessment=assessment_csv)
+
+@app.route('/download/<path:filename>')
+def download(filename):
+    for folder in (STRUCTURES_DIR,REPORTS_DIR,GRAPHS_DIR):
+        candidate=os.path.abspath(os.path.join(folder,filename))
+        if candidate.startswith(os.path.abspath(folder)+os.sep) and os.path.isfile(candidate):
+            return send_from_directory(folder,filename,as_attachment=True)
+    abort(404)
+
+@app.route('/health')
+def health():
+    return {'status':'ok','rdkit_required':False,'chemistry_mode':'preset reference library'}
+
+if __name__=='__main__':
+    print('Cheminformatics Virtual Laboratory is starting...')
+    print('Open http://127.0.0.1:5000 in your browser.')
+    app.run(host='127.0.0.1',port=5000,debug=False)
